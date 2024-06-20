@@ -9,8 +9,8 @@ use crate::{
 };
 use anyhow::{anyhow, Result};
 use base64::Engine;
-use cid::multihash::Code;
 use log::warn;
+use multihash_codetable::Code;
 use rand::Rng;
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -122,6 +122,8 @@ where
     facts: FactsMap,
     proofs: Vec<String>,
     add_nonce: bool,
+
+    add_proof_facts: bool,
 }
 
 impl<'a, K> Default for UcanBuilder<'a, K>
@@ -150,6 +152,8 @@ where
             facts: BTreeMap::new(),
             proofs: Vec::new(),
             add_nonce: false,
+
+            add_proof_facts: false,
         }
     }
 }
@@ -206,9 +210,30 @@ where
         self
     }
 
+    /// Add facts or proofs of knowledge to this UCAN.
+    pub fn with_facts<T: Serialize + DeserializeOwned>(mut self, facts: &[(String, T)]) -> Self {
+        let f: Vec<(String, serde_json::Value)> = facts
+            .iter()
+            .map(|k| {
+                (
+                    k.0.to_owned(),
+                    serde_json::to_value(&k.1).unwrap_or(serde_json::json!("null")),
+                )
+            })
+            .collect();
+        self.facts.extend(f);
+        self
+    }
+
     /// Will ensure that the built UCAN includes a number used once.
     pub fn with_nonce(mut self) -> Self {
         self.add_nonce = true;
+        self
+    }
+
+    /// Will add a collection of proof tokens (if any) to the facts field "prf".
+    pub fn with_add_proof_facts(mut self, add_proof_facts: bool) -> Self {
+        self.add_proof_facts = add_proof_facts;
         self
     }
 
@@ -217,13 +242,43 @@ where
     /// or else the proof chain will be invalidated!
     /// The proof is encoded into a [Cid], hashed via the [UcanBuilder::default_hasher()]
     /// algorithm, unless one is provided.
-    pub fn witnessed_by(mut self, authority: &Ucan, hasher: Option<Code>) -> Self {
+    pub fn witnessed_by(mut self, authority: &Ucan, hasher: Option<Code>) -> Result<Self> {
         match authority.to_cid(hasher.unwrap_or_else(|| UcanBuilder::<K>::default_hasher())) {
-            Ok(proof) => self.proofs.push(proof.to_string()),
-            Err(error) => warn!("Failed to add authority to proofs: {}", error),
+            Ok(proof) => {
+                self.insert_proof(&proof, authority)?;
+                Ok(self)
+            }
+            Err(error) => Err(anyhow!("Failed to add authority to proofs: {}", error)),
+        }
+    }
+
+    fn insert_proof(&mut self, proof: &cid::Cid, authority: &Ucan) -> Result<()> {
+        self.proofs.push(proof.to_string());
+        if self.add_proof_facts {
+            if !self.facts.contains_key("prf") {
+                self.facts.insert("prf".to_owned(), serde_json::json!({}));
+            }
+            if let Some(prf_map) = self.facts.get_mut("prf") {
+                if let Some(prf_map) = prf_map.as_object_mut() {
+                    prf_map.insert(
+                        proof.to_string(),
+                        serde_json::Value::String(authority.encode()?),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // Includes a collection of UCANs in the list of proofs for the UCAN to be built.
+    // (see witnessed_by)
+    pub fn with_proofs(self, proofs: &Vec<Ucan>, hasher: Option<Code>) -> Result<Self> {
+        let mut s = self;
+        for authority in proofs {
+            s = s.witnessed_by(authority, hasher)?;
         }
 
-        self
+        Ok(s)
     }
 
     /// Claim a capability by inheritance (from an authorizing proof) or
@@ -254,26 +309,26 @@ where
     /// you're building.
     /// The proof is encoded into a [Cid], hashed via the [UcanBuilder::default_hasher()]
     /// algorithm, unless one is provided.
-    pub fn delegating_from(mut self, authority: &Ucan, hasher: Option<Code>) -> Self {
+    pub fn delegating_from(mut self, authority: &Ucan, hasher: Option<Code>) -> Result<Self> {
         match authority.to_cid(hasher.unwrap_or_else(|| UcanBuilder::<K>::default_hasher())) {
             Ok(proof) => {
-                self.proofs.push(proof.to_string());
-                let proof_index = self.proofs.len() - 1;
+                self.insert_proof(&proof, authority)?;
                 let proof_delegation = ProofDelegationSemantics {};
-                let capability =
-                    proof_delegation.parse(&format!("prf:{proof_index}"), "ucan/DELEGATE", None);
+                let capability = proof_delegation.parse(&format!("ucan:{proof}"), "ucan/*", None);
 
                 match capability {
                     Some(capability) => {
                         self.capabilities.push(Capability::from(&capability));
                     }
-                    None => warn!("Could not produce delegation capability"),
+                    None => {
+                        return Err(anyhow!("Could not produce delegation capability"));
+                    }
                 }
             }
-            Err(error) => warn!("Could not encode authoritative UCAN: {:?}", error),
+            Err(error) => return Err(anyhow!("Could not encode authoritative UCAN: {:?}", error)),
         };
 
-        self
+        Ok(self)
     }
 
     /// Returns the default hasher ([Code::Blake3_256]) used for [Cid] encodings.

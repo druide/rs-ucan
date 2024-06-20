@@ -48,7 +48,9 @@ pub async fn scaffold_ucan_builder(identities: &Identities) -> Result<UcanBuilde
         .for_audience(identities.alice_did.as_str())
         .with_expiration(1664232146010)
         .witnessed_by(&leaf_ucan_alice, None)
+        .unwrap()
         .witnessed_by(&leaf_ucan_bob, None)
+        .unwrap()
         .claiming_capability(&send_email_as_alice)
         .claiming_capability(&send_email_as_bob);
 

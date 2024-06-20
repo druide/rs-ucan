@@ -1,6 +1,8 @@
-use super::{Capability, Caveat};
+use super::{proof::ProofSelection, Capability, Caveat};
 use serde_json::{json, Value};
+use std::convert::TryFrom;
 use std::fmt::Debug;
+use std::fmt::Display;
 use url::Url;
 
 pub trait Scope: ToString + TryFrom<Url> + PartialEq + Clone {
@@ -10,49 +12,12 @@ pub trait Scope: ToString + TryFrom<Url> + PartialEq + Clone {
 pub trait Ability: Ord + TryFrom<String> + ToString + Clone {}
 
 #[derive(Clone, Eq, PartialEq)]
-pub enum ResourceUri<S>
-where
-    S: Scope,
-{
-    Scoped(S),
-    Unscoped,
-}
-
-impl<S> ResourceUri<S>
-where
-    S: Scope,
-{
-    pub fn contains(&self, other: &Self) -> bool {
-        match self {
-            ResourceUri::Unscoped => true,
-            ResourceUri::Scoped(scope) => match other {
-                ResourceUri::Scoped(other_scope) => scope.contains(other_scope),
-                _ => false,
-            },
-        }
-    }
-}
-
-impl<S> ToString for ResourceUri<S>
-where
-    S: Scope,
-{
-    fn to_string(&self) -> String {
-        match self {
-            ResourceUri::Unscoped => "*".into(),
-            ResourceUri::Scoped(value) => value.to_string(),
-        }
-    }
-}
-
-#[derive(Clone, Eq, PartialEq)]
 pub enum Resource<S>
 where
     S: Scope,
 {
-    Resource { kind: ResourceUri<S> },
-    My { kind: ResourceUri<S> },
-    As { did: String, kind: ResourceUri<S> },
+    ResourceUri(S),
+    Ucan(ProofSelection),
 }
 
 impl<S> Resource<S>
@@ -61,43 +26,32 @@ where
 {
     pub fn contains(&self, other: &Self) -> bool {
         match (self, other) {
-            (
-                Resource::Resource { kind: resource },
-                Resource::Resource {
-                    kind: other_resource,
-                },
-            ) => resource.contains(other_resource),
-            (
-                Resource::My { kind: resource },
-                Resource::My {
-                    kind: other_resource,
-                },
-            ) => resource.contains(other_resource),
-            (
-                Resource::As {
-                    did,
-                    kind: resource,
-                },
-                Resource::As {
-                    did: other_did,
-                    kind: other_resource,
-                },
-            ) if did == other_did => resource.contains(other_resource),
+            (Resource::ResourceUri(resource), Resource::ResourceUri(other_resource)) => {
+                resource.contains(other_resource)
+            }
+            (Resource::Ucan(resource), Resource::Ucan(other_resource)) => {
+                resource.contains(other_resource)
+            }
+            (Resource::Ucan(resource), Resource::ResourceUri(_other_resource)) => {
+                // TODO is it called at all?
+                matches!(resource, ProofSelection::All | ProofSelection::TheseProofs)
+            }
             _ => false,
         }
     }
 }
 
-impl<S> ToString for Resource<S>
+impl<S> Display for Resource<S>
 where
     S: Scope,
 {
-    fn to_string(&self) -> String {
-        match self {
-            Resource::Resource { kind } => kind.to_string(),
-            Resource::My { kind } => format!("my:{}", kind.to_string()),
-            Resource::As { did, kind } => format!("as:{did}:{}", kind.to_string()),
-        }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let resource_content = match self {
+            Resource::Ucan(kind) => kind.to_string(),
+            Resource::ResourceUri(kind) => kind.to_string(),
+        };
+
+        write!(f, "{resource_content}")
     }
 }
 
@@ -111,34 +65,6 @@ where
     }
     fn parse_action(&self, ability: &str) -> Option<A> {
         A::try_from(String::from(ability)).ok()
-    }
-
-    fn extract_did(&self, path: &str) -> Option<(String, String)> {
-        let mut path_parts = path.split(':');
-
-        match path_parts.next() {
-            Some("did") => (),
-            _ => return None,
-        };
-
-        match path_parts.next() {
-            Some("key") => (),
-            _ => return None,
-        };
-
-        let value = match path_parts.next() {
-            Some(value) => value,
-            _ => return None,
-        };
-
-        Some((format!("did:key:{value}"), path_parts.collect()))
-    }
-
-    fn parse_resource(&self, resource: &Url) -> Option<ResourceUri<S>> {
-        Some(match resource.path() {
-            "*" => ResourceUri::Unscoped,
-            _ => ResourceUri::Scoped(self.parse_scope(resource)?),
-        })
     }
 
     fn parse_caveat(&self, caveat: Option<&Value>) -> Value {
@@ -157,22 +83,12 @@ where
         ability: &str,
         caveat: Option<&Value>,
     ) -> Option<CapabilityView<S, A>> {
-        let uri = Url::parse(resource).ok()?;
-
-        let cap_resource = match uri.scheme() {
-            "my" => Resource::My {
-                kind: self.parse_resource(&uri)?,
-            },
-            "as" => {
-                let (did, resource) = self.extract_did(uri.path())?;
-                Resource::As {
-                    did,
-                    kind: self.parse_resource(&Url::parse(resource.as_str()).ok()?)?,
-                }
-            }
-            _ => Resource::Resource {
-                kind: self.parse_resource(&uri)?,
-            },
+        // "ucan://did..." cannot be parsed by "url" crate
+        let cap_resource = if resource.starts_with("ucan:") {
+            Resource::Ucan(ProofSelection::try_from(resource.to_owned()).ok()?)
+        } else {
+            let uri = Url::parse(resource).ok()?;
+            Resource::ResourceUri(self.parse_scope(&uri)?)
         };
 
         let cap_ability = match self.parse_action(ability) {

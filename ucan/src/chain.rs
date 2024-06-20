@@ -1,7 +1,7 @@
 use crate::{
     capability::{
         proof::{ProofDelegationSemantics, ProofSelection},
-        Ability, CapabilitySemantics, CapabilityView, Resource, ResourceUri, Scope,
+        Ability, CapabilitySemantics, CapabilityView, Resource, Scope,
     },
     crypto::did::DidParser,
     store::UcanJwtStore,
@@ -10,6 +10,7 @@ use crate::{
 use anyhow::{anyhow, Result};
 use async_recursion::async_recursion;
 use cid::Cid;
+use multihash_codetable::Code;
 use std::{collections::BTreeSet, fmt::Debug};
 
 const PROOF_DELEGATION_SEMANTICS: ProofDelegationSemantics = ProofDelegationSemantics {};
@@ -42,7 +43,7 @@ where
 pub struct ProofChain {
     ucan: Ucan,
     proofs: Vec<ProofChain>,
-    redelegations: BTreeSet<usize>,
+    redelegations: BTreeSet<Cid>,
 }
 
 impl ProofChain {
@@ -65,7 +66,11 @@ impl ProofChain {
         if let Some(ucan_proofs) = ucan.proofs() {
             for cid_string in ucan_proofs.iter() {
                 let cid = Cid::try_from(cid_string.as_str())?;
-                let ucan_token = store.require_token(&cid).await?;
+                // Try to get embedded proof, then request a storage
+                let ucan_token = match ucan.require_token(&cid) {
+                    Some(token) => token,
+                    None => store.require_token(&cid).await?,
+                };
                 let proof_chain =
                     Self::try_from_token_string(&ucan_token, now_time, did_parser, store).await?;
                 proof_chain.validate_link_to(&ucan)?;
@@ -73,34 +78,60 @@ impl ProofChain {
             }
         }
 
-        let mut redelegations = BTreeSet::<usize>::new();
+        let mut redelegations = BTreeSet::<Cid>::new();
 
         for capability in ucan
             .capabilities()
             .iter()
             .filter_map(|cap| PROOF_DELEGATION_SEMANTICS.parse_capability(&cap))
         {
-            match capability.resource() {
-                Resource::Resource {
-                    kind: ResourceUri::Scoped(ProofSelection::All),
-                } => {
-                    for index in 0..proofs.len() {
-                        redelegations.insert(index);
+            match capability.resource {
+                Resource::Ucan(kind) => {
+                    match kind {
+                        ProofSelection::All | ProofSelection::TheseProofs => {
+                            for proof in proofs.iter() {
+                                redelegations.insert(proof.ucan.to_cid(Self::default_hasher())?);
+                            }
+                        }
+                        ProofSelection::Cid(cid) => {
+                            if proofs.iter().any(|proof| {
+                                if let Ok(proof_cid) = proof.ucan.to_cid(Self::default_hasher()) {
+                                    proof_cid == cid
+                                } else {
+                                    false
+                                }
+                            }) {
+                                redelegations.insert(cid);
+                            } else {
+                                return Err(anyhow!(
+                                    "Unable to redelegate proof; CID not found {}",
+                                    cid
+                                ));
+                            }
+                        }
+                        ProofSelection::Did(did) => {
+                            if let Some(proof) =
+                                proofs.iter().find(|proof| proof.ucan.issuer() == did)
+                            {
+                                redelegations.insert(proof.ucan.to_cid(Self::default_hasher())?);
+                            } else {
+                                return Err(anyhow!(
+                                    "Unable to redelegate proof; DID not found {}",
+                                    did
+                                ));
+                            }
+                        }
+                        ProofSelection::DidScheme(_did, _scheme) => {
+                            // TODO need to filter by scheme, probably not here
+                            return Err(anyhow!(
+                                "Unable to redelegate proof; `ucan://<did>/<scheme>` not supported"
+                            ));
+                        }
                     }
                 }
-                Resource::Resource {
-                    kind: ResourceUri::Scoped(ProofSelection::Index(index)),
-                } => {
-                    if *index < proofs.len() {
-                        redelegations.insert(*index);
-                    } else {
-                        return Err(anyhow!(
-                            "Unable to redelegate proof; no proof at zero-based index {}",
-                            index
-                        ));
-                    }
+                _ => {
+                    continue;
                 }
-                _ => continue,
             }
         }
 
@@ -184,34 +215,48 @@ impl ProofChain {
         let ancestral_capability_infos: Vec<CapabilityInfo<S, A>> = self
             .proofs
             .iter()
-            .enumerate()
-            .flat_map(|(index, ancestor_chain)| {
-                if self.redelegations.contains(&index) {
-                    Vec::new()
+            .flat_map(|ancestor_chain| {
+                if let Ok(cid) = ancestor_chain.ucan.to_cid(Self::default_hasher()) {
+                    if self.redelegations.contains(&cid) {
+                        Vec::new()
+                    } else {
+                        ancestor_chain.reduce_capabilities(semantics)
+                    }
                 } else {
-                    ancestor_chain.reduce_capabilities(semantics)
+                    // skip if error
+                    Vec::new()
                 }
             })
             .collect();
 
         // Get the set of capabilities that are blanket redelegated from
-        // ancestor proofs (via the prf: resource):
+        // ancestor proofs (via the ucan: resource):
         let mut redelegated_capability_infos: Vec<CapabilityInfo<S, A>> = self
             .redelegations
             .iter()
-            .flat_map(|index| {
-                self.proofs
-                    .get(*index)
-                    .unwrap()
-                    .reduce_capabilities(semantics)
-                    .into_iter()
-                    .map(|mut info| {
-                        // Redelegated capabilities should be attenuated by
-                        // this UCAN's lifetime
-                        info.not_before = *self.ucan.not_before();
-                        info.expires_at = *self.ucan.expires_at();
-                        info
-                    })
+            .flat_map(|redelegation_cid| {
+                let proof_chain = self.proofs.iter().find(|proof| {
+                    if let Ok(cid) = proof.ucan.to_cid(Self::default_hasher()) {
+                        &cid == redelegation_cid
+                    } else {
+                        false
+                    }
+                });
+                if let Some(proof_chain) = proof_chain {
+                    proof_chain
+                        .reduce_capabilities(semantics)
+                        .into_iter()
+                        .map(|mut info| {
+                            // Redelegated capabilities should be attenuated by
+                            // this UCAN's lifetime
+                            info.not_before = *self.ucan.not_before();
+                            info.expires_at = *self.ucan.expires_at();
+                            info
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                }
             })
             .collect();
 
@@ -285,5 +330,10 @@ impl ProofChain {
         }
 
         merged_capability_infos
+    }
+
+    /// Returns the default hasher ([Code::Blake3_256]) used for [Cid] encodings.
+    pub fn default_hasher() -> Code {
+        Code::Blake3_256
     }
 }

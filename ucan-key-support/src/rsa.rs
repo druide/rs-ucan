@@ -12,7 +12,7 @@ use ucan::crypto::{JwtSignatureAlgorithm, KeyMaterial};
 pub use ucan::crypto::did::RSA_MAGIC_BYTES;
 
 pub fn bytes_to_rsa_key(bytes: Vec<u8>) -> Result<Box<dyn KeyMaterial>> {
-    println!("Trying to parse RSA key...");
+    // println!("Trying to parse RSA key...");
     // NOTE: DID bytes are PKCS1, but we store RSA keys as PKCS8
     let public_key = RsaPublicKey::from_pkcs1_der(&bytes)?;
 

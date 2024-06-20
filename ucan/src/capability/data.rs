@@ -1,5 +1,9 @@
 use anyhow::anyhow;
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::Deserializer,
+    ser::{SerializeMap, Serializer},
+    Deserialize, Serialize,
+};
 use serde_json::Value;
 use std::{
     collections::{btree_map::Iter as BTreeMapIter, BTreeMap},
@@ -63,7 +67,7 @@ type CapabilitiesIterator<'a> = FlatMap<
     fn((&'a String, &'a AbilitiesImpl)) -> AbilitiesMap<'a>,
 >;
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 /// The [Capabilities] struct contains capability data as a map-of-maps, matching the
 /// [spec](https://github.com/ucan-wg/spec#326-capabilities--attenuation).
 /// See `iter()` to deconstruct this map into a sequence of [Capability] datas.
@@ -84,6 +88,30 @@ type CapabilitiesIterator<'a> = FlatMap<
 /// assert_eq!(resource.get("msg/send").unwrap(), &vec![json!({ "draft": true }), json!({ "publish": true, "topic": ["foo"] })])
 /// ```
 pub struct Capabilities(CapabilitiesImpl);
+
+impl Serialize for Capabilities {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(self.len()))?;
+        for (k, v) in self.0.iter() {
+            map.serialize_entry(k, v)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Capabilities {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let t: BTreeMap<String, BTreeMap<String, Vec<Value>>> =
+            Deserialize::deserialize(deserializer)?;
+        Ok(Capabilities(t))
+    }
+}
 
 impl Capabilities {
     /// Using a [FlatMap] implementation, iterate over a [Capabilities] map-of-map

@@ -6,11 +6,9 @@ use crate::{
 };
 use anyhow::{anyhow, Result};
 use base64::Engine;
-use cid::{
-    multihash::{Code, MultihashDigest},
-    Cid,
-};
+use cid::Cid;
 use libipld_core::{codec::Codec, raw::RawCodec};
+pub use multihash_codetable::{Code, MultihashDigest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, convert::TryFrom, str::FromStr};
@@ -201,6 +199,19 @@ impl Ucan {
         let token = self.encode()?;
         let encoded = codec.encode(token.as_bytes())?;
         Ok(Cid::new_v1(codec.into(), hasher.digest(&encoded)))
+    }
+
+    pub fn require_token(&self, cid: &Cid) -> Option<String> {
+        if let Some(facts) = &self.payload.fct {
+            if let Some(fact_prf) = facts.get("prf") {
+                if let Some(fact_prf) = fact_prf.as_object() {
+                    if let Some(token) = fact_prf.get(&cid.to_string()) {
+                        return token.as_str().map(|token| token.to_owned());
+                    }
+                }
+            }
+        }
+        None
     }
 }
 

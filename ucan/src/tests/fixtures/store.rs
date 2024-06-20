@@ -1,14 +1,12 @@
 use crate::store::{UcanStore, UcanStoreConditionalSend};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use cid::{
-    multihash::{Code, MultihashDigest},
-    Cid,
-};
+use cid::Cid;
 use libipld_core::{
     codec::{Codec, Decode, Encode},
     raw::RawCodec,
 };
+use multihash_codetable::{Code, MultihashDigest};
 use std::{
     collections::HashMap,
     io::Cursor,

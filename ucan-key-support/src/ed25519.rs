@@ -14,6 +14,12 @@ pub fn bytes_to_ed25519_key(bytes: Vec<u8>) -> Result<Box<dyn KeyMaterial>> {
     Ok(Box::new(Ed25519KeyMaterial(public_key, None)))
 }
 
+pub fn bytes_to_ed25519_private_key(bytes: Vec<u8>) -> Result<Box<dyn KeyMaterial>> {
+    let private_key = Ed25519PrivateKey::try_from(bytes.as_slice())?;
+    let public_key = Ed25519PublicKey::from(&private_key);
+    Ok(Box::new(Ed25519KeyMaterial(public_key, Some(private_key))))
+}
+
 #[derive(Clone)]
 pub struct Ed25519KeyMaterial(pub Ed25519PublicKey, pub Option<Ed25519PrivateKey>);
 

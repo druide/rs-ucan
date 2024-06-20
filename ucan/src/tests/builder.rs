@@ -11,8 +11,8 @@ use crate::{
     },
     time::now,
 };
-use cid::multihash::Code;
 use did_key::PatchedKeyPair;
+use multihash_codetable::Code;
 use serde_json::json;
 
 #[cfg(target_arch = "wasm32")]
@@ -141,6 +141,7 @@ async fn it_prevents_duplicate_proofs() {
         .for_audience(identities.mallory_did.as_str())
         .with_lifetime(30)
         .witnessed_by(&ucan, None)
+        .unwrap()
         .claiming_capability(&attenuated_cap_1)
         .claiming_capability(&attenuated_cap_2)
         .build()
@@ -180,6 +181,7 @@ pub async fn it_can_use_custom_hasher() {
         .for_audience(identities.mallory_did.as_str())
         .with_lifetime(50)
         .witnessed_by(&leaf_ucan, Some(Code::Blake2b256))
+        .unwrap()
         .build()
         .unwrap()
         .sign()

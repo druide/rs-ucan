@@ -59,7 +59,7 @@ impl DidParser {
                 self.key_cache
                     .get(&did)
                     .ok_or_else(|| anyhow!("Couldn't find cached key"))
-                    .map(|key| key.clone())
+                    .cloned()
             }
             None => Err(anyhow!("Unrecognized magic bytes: {:?}", magic_bytes)),
         }

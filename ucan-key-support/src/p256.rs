@@ -16,6 +16,12 @@ pub fn bytes_to_p256_key(bytes: Vec<u8>) -> Result<Box<dyn KeyMaterial>> {
     Ok(Box::new(P256KeyMaterial(public_key, None)))
 }
 
+pub fn bytes_to_p256_private_key(bytes: Vec<u8>) -> Result<Box<dyn KeyMaterial>> {
+    let private_key = P256PrivateKey::try_from(bytes.as_slice())?;
+    let public_key = P256PublicKey::from(&private_key);
+    Ok(Box::new(P256KeyMaterial(public_key, Some(private_key))))
+}
+
 /// Support for NIST P-256 keys, aka secp256r1, aka ES256
 #[derive(Clone)]
 pub struct P256KeyMaterial(pub P256PublicKey, pub Option<P256PrivateKey>);
